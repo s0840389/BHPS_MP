@@ -14,6 +14,8 @@ require(sqldf)
 setwd('~/OneDrive/Documents/research/BHPS/')
 
 
+useown=0 # calc quantiles using dataset not hmrc
+
 # harmonised data
 
   load('indresp.rda')
@@ -112,22 +114,32 @@ setwd('~/OneDrive/Documents/research/BHPS/')
   
   # merge on previous income values
   
+  for(h in c(1,2)){
+  
     dtmerge=dt[,.(pidp,intdate,fihhmngrs_eqv_dv,fihhmngrs_dv,fimngrs_dv,fimnlabgrs_dv)]
-    colnames(dtmerge)=paste(colnames(dtmerge),'_L',1,sep='')
+    colnames(dtmerge)=paste(colnames(dtmerge),'_L',h,sep='')
     
-    dt=data.table(sqldf('select t1.*,
+    query=sprintf('select t1.*,
             t2.*
             from dt as t1 
             left join dtmerge as t2 
-            on t1.intdate-365 between (t2.intdate_L1-62) and (t2.intdate_L1+62)
-            and t1.pidp=t2.pidp_L1'))
+            on t1.intdate-365*%i between (t2.intdate_L%i-62*%i) and (t2.intdate_L%i+62*%i)
+            and t1.pidp=t2.pidp_L%i',h,h,min(h,2),h,min(h,2),h)
+    
+    dt=data.table(sqldf(query))
+    
+  }
   
-
+  # average of current and previous periods income
   dt$fihhmngrs_eqv_dv_00=(dt$fihhmngrs_eqv_dv+dt$fihhmngrs_eqv_dv_L1*1.04)*0.5
   dt$fimngrs_dv_00=(dt$fimngrs_dv+dt$fimngrs_dv_L1*1.04)*0.5
   dt$fimnlabgrs_dv_00=(dt$fimnlabgrs_dv+dt$fimnlabgrs_dv_L1*1.04)*0.5
   
-    
+  # average of current previous two periods income
+  dt$fihhmngrs_eqv_dv_003=(dt$fihhmngrs_eqv_dv+dt$fihhmngrs_eqv_dv_L1*1.04+dt$fihhmngrs_eqv_dv_L2*1.08)*1/3
+  dt$fimngrs_dv_003=(dt$fimngrs_dv+dt$fimngrs_dv_L1*1.04+dt$fimngrs_dv_L2*1.08)*1/3
+  dt$fimnlabgrs_dv_003=(dt$fimnlabgrs_dv+dt$fimnlabgrs_dv_L1*1.04+dt$fimnlabgrs_dv_L2*1.08)*1/3
+  
   # Income quantile
   
   dt_hmrc=read_xlsx('MP_Inequality/input/Table_3.1a_2021.xlsx',sheet='Table_3_1a_before_tax',range='A5:W104')
@@ -152,7 +164,30 @@ setwd('~/OneDrive/Documents/research/BHPS/')
   
   dt_pct$fy=dt_pct$year  
   
-  dt=merge(dt,dt_pct[,.(fy,pct10,pct20,pct30,pct40,pct50,pct60,pct70,pct80,pct90,pct95,pct99)],by='fy',all.x=TRUE)
+  
+  if(useown==1){
+    
+    dt_pct=dt[ytot>72*52,.(pct10=quantile(ytot,0.10,na.rm=TRUE),
+                           pct20=quantile(ytot,0.20,na.rm=TRUE),
+                           pct30=quantile(ytot,0.30,na.rm=TRUE),
+                           pct40=quantile(ytot,0.40,na.rm=TRUE),
+                           pct50=quantile(ytot,0.50,na.rm=TRUE),
+                           pct60=quantile(ytot,0.60,na.rm=TRUE),
+                           pct70=quantile(ytot,0.70,na.rm=TRUE),
+                           pct80=quantile(ytot,0.80,na.rm=TRUE),
+                           pct90=quantile(ytot,0.90,na.rm=TRUE),
+                           pct95=quantile(ytot,0.95,na.rm=TRUE),
+                           pct99=quantile(ytot,0.99,na.rm=TRUE)),by=year]
+
+    dt=merge(dt,dt_pct[,.(year,pct10,pct20,pct30,pct40,pct50,pct60,pct70,pct80,pct90,pct95,pct99)],by='year',all.x=TRUE)
+    
+  } else {
+    
+    dt=merge(dt,dt_pct[,.(fy,pct10,pct20,pct30,pct40,pct50,pct60,pct70,pct80,pct90,pct95,pct99)],by='fy',all.x=TRUE)
+    
+    
+      }
+  
     
   
   assign_pct=function(dt,x,out){ # function to bin incomes
@@ -186,6 +221,7 @@ setwd('~/OneDrive/Documents/research/BHPS/')
     assign_pct(dt,'fihhmngrs_eqv_dv','_hh')
     assign_pct(dt,'fimngrs_dv','_ind')
     assign_pct(dt,'fimngrs_dv_00','_indbar')
+    assign_pct(dt,'fimngrs_dv_003','_indbar3')
     assign_pct(dt,'fimnlabgrs_dv','_ind')
     assign_pct(dt,'fimnlabgrs_dv_00','_indlab')
     
@@ -197,6 +233,11 @@ setwd('~/OneDrive/Documents/research/BHPS/')
   
   dt$renter=1*(dt$tenure_dv %in% c('housing assoc rented','local authority rent','other rented','rented from employer',
                                    'local authority rented','rented private furnished','rented private unfurnished'))
+  
+  dt$renter_pr=1*(dt$tenure_dv %in% c('rented from employer','rented private furnished','rented private unfurnished'))
+  
+  dt$renter_so=1*(dt$tenure_dv %in% c('housing assoc rented','local authority rent','other rented',
+                                      'local authority rented'))
   
   dt$owner=1*(dt$tenure_dv %in% c('owned with mortgage','owned outright'))
   
@@ -240,16 +281,17 @@ setwd('~/OneDrive/Documents/research/BHPS/')
   
   if(dochecks==1){
   
-    dtagg=dt[ytot>1000&is.na(ytot)==FALSE&ytot<25e6,.(ytotw=weighted.mean(ytot,indin_xw,na.rm=TRUE),
+    dtagg=dt[is.na(fimngrs_dv_00)==FALSE&ytot>52*200&is.na(ytot)==FALSE&ytot<25e6&age_dv>=20&age_dv<=70,.(ytotw=weighted.mean(ytot,indin_xw,na.rm=TRUE),
                 ytot=mean(ytot,na.rm=TRUE),
                 Ew=weighted.mean(E,indin_xw,na.rm=TRUE),
                 E=mean(E,na.rm=TRUE),
-                pct90w=sum((g10=='90')*indin_xw)/sum(indin_xw),
-                pct80w=sum((g10=='80')*indin_xw)/sum(indin_xw),
-                pct70w=sum((g10=='70')*indin_xw)/sum(indin_xw),
-                pct30w=sum((g10=='30')*indin_xw)/sum(indin_xw),
-                pct10w=sum((g10=='10')*indin_xw)/sum(indin_xw),
-                pct90=mean(1*(g10=='90'),na.rm=TRUE)),by=year]
+                pct90w=sum((g10_ind=='90')*indin_xw)/sum(indin_xw),
+                pct80w=sum((g10_ind=='80')*indin_xw)/sum(indin_xw),
+                pct70w=sum((g10_ind=='70')*indin_xw)/sum(indin_xw),
+                pct30w=sum((g10_ind=='30')*indin_xw)/sum(indin_xw),
+                pct10w=sum((g10_ind=='10')*indin_xw)/sum(indin_xw),
+                pct10=mean(1*(g10_ind=='10')),
+                pct90=mean(1*(g10_ind=='90'),na.rm=TRUE)),by=year]
     
 dt_cpi=data.table(dt_cpi)
 dt_cpiy=dt_cpi[,.('cpi'=mean(cpi)),by=year]
@@ -259,6 +301,7 @@ dt_hmrc2=dt_hmrc2[variable!='ybha']
 dt_hmrc2=dt_hmrc2[,.(ybarnom=mean(value)),by=year]    
 dt_hmrc2=merge(dt_hmrc2,dt_cpiy,by='year')
 dt_hmrc2$ybar=dt_hmrc2$ybarnom/dt_hmrc2$cpi*100  
+dt_hmrc2$dybar=dt_hmrc2$ybar/lag(dt_hmrc2$ybar)-1
 
 dtagg=merge(dtagg,dt_hmrc2,by='year',all.x=TRUE)
 
@@ -271,14 +314,24 @@ fg.pct90=ggplot(data=dtagg)+geom_line(aes(x=year,y=pct90w,color='pct90')) +
   geom_line(aes(x=year,y=pct80w,color='pct80'))   +
   geom_line(aes(x=year,y=pct70w,color='pct70'))   +
   geom_line(aes(x=year,y=pct30w,color='pct30'))+
-  geom_line(aes(x=year,y=pct10w,color='pct10'))
+  geom_line(aes(x=year,y=pct10w,color='pct10'))+
+  geom_line(aes(x=year,y=pct10,color='pct10 unweighted'))
 
 
 dy=dt$dytot_H1[is.na(dt$dytot_H1)==FALSE&dt$ytot>0&dt$E==1&dt$ytot>1000]
 
 
-
 dtw=dt[is.na(dt$ytothh_H1)==FALSE&year<=2019,.(.N,sum(indin_lw)),by=year]
 dtw=dtw[order(year)]
+
+
+
+dtmh1=dt[is.na(fimngrs_dv_00)==FALSE&ytot>72*52&is.na(ytot_H1)==FALSE&age_dv>=20&age_dv<=65]
+
+dt_hmrc2$fy=dt_hmrc2$year
+dtmh1_agg=dtmh1[,.(dy=sum(ytot_H1)/sum(ytot)-1),by=fy]
+dtmh1_agg=merge(dtmh1_agg,dt_hmrc2,by='fy')
+
+fg.dy=ggplot(data=dtmh1_agg)+geom_line(aes(x=fy,y=dybar,color='hmrc'))+geom_line(aes(x=fy,y=dy,color='bhps'))
 
 }
